@@ -1,0 +1,5 @@
+id,site_id,latitude,longitude,tower_height,antena_height,site_type,operator,colopriming_status,overall_grade,potential_collocation,avg_distance,avg_distance_opt,surrounding_quality,signal_strength,gridness_ratio,gridness_quadran,total_population,total_poi,market_share,market_share_village,market_share_district,area_factor,arpu,total_revenue,grade_revenue
+1.0,2203211004,-3.31458,114.61913,52.0,52.0,existing,TSEL,0,Buffer,nok,112.06713139000738,410.34926222660584,1,-85.3504761904762,89.73859280863948,2,4107,26,0.4106398807736843,0.2480731967003257,0.4611863875937037,1.0226475907880177,40000,68987724,SILVER
+2.0,2405501001,0.91347,124.70032,52.0,52.0,existing,TSEL,1,already-colo,ok,0.0,0.0,0,0.0,0.0,0,1289,2,1.0,1.0,0.4,3.266272313168724,40000,168409000,GOLD
+3.0,2103581003,-1.137031,115.608461,72.0,72.0,build-to-suit,TSEL,0,Buffer,nok,478.78980346375687,0.0,1,0.0,0.0,0,515,0,0.2283094374878737,0.2283094374878737,0.18587290019916308,3.0,40000,14109523,BRONZE
+4.0,2304311003,-0.711455,115.767731,72.0,72.0,build-to-suit,TSEL,0,Buffer,nok,360.301150447892,0.0,1,-106.0,0.0,0,797,5,1.0,1.0,0.39999999999999997,1.0,40000,31880000,BRONZE

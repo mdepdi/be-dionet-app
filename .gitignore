@@ -1,0 +1,6 @@
+__pycache__/
+data/
+notebook/
+cloud-sql-proxy.exe
+# .env
+playground.ipynb

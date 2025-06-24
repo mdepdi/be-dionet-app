@@ -1,0 +1,59 @@
+version: '3.11'
+
+services:
+  app:
+      build:
+        context: .
+        dockerfile: app.dockerfile
+      restart: 'always'
+      hostname: 'app.be-dionet'
+      ports:
+        - "9000:8000"
+      volumes:
+        - ./data:/app/data
+        - ./dionet_data:/app/dionet_data
+      env_file:
+        - .env
+  redis:
+    image: redis:alpine3.18
+    restart: 'always'
+    hostname: 'redis.be-dionet'
+    ports:
+      - "6379:6379"
+
+  celery:
+    build:
+      context: .
+      dockerfile: celery_worker.dockerfile
+    hostname: 'celery.be-dionet'
+    restart: 'always'
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - app
+    volumes:
+      - ./data:/app/data
+      - ./dionet_data:/app/dionet_data
+
+
+  flower:
+    image: mher/flower:1.2
+    hostname: 'flower.be-dionet'
+    restart: 'always'
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env
+    depends_on:
+      - celery
+      - redis
+      - app
+
+  martin:
+    image: ghcr.io/maplibre/martin:v0.13.0
+    restart: unless-stopped
+    ports:
+      - "5000:3000"
+    env_file:
+      - .env
