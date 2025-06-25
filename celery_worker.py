@@ -30,18 +30,19 @@ celery.conf.result_serializer = 'json'
 celery.conf.timezone = 'UTC'
 celery.conf.enable_utc = True
 
-# Add task tracking
-celery.conf.task_track_started = True
-celery.conf.task_send_sent_event = True
+# Disable event monitoring to prevent dispatcher issues
+celery.conf.worker_send_task_events = False
+celery.conf.task_send_sent_event = False
+celery.conf.task_track_started = False
 
 # Set task time limits - increased for build-to-suit processing
 celery.conf.task_time_limit = int(os.environ.get('CELERY_TASK_TIME_LIMIT', 3600))  # 1 hour hard limit
 celery.conf.task_soft_time_limit = int(os.environ.get('CELERY_TASK_SOFT_TIME_LIMIT', 3300))  # 55 minutes soft limit
 
-# Worker settings
-celery.conf.worker_prefetch_multiplier = int(os.environ.get('CELERY_WORKER_PREFETCH_MULTIPLIER', 1))
+# Worker settings - simplified to prevent conflicts
+celery.conf.worker_prefetch_multiplier = 1
 celery.conf.worker_max_tasks_per_child = 1000
-celery.conf.worker_concurrency = int(os.environ.get('CELERY_WORKER_CONCURRENCY', 4))
+celery.conf.worker_concurrency = 1  # Set to 1 for solo pool
 
 # Improved task handling settings
 celery.conf.task_ignore_result = False
@@ -50,6 +51,10 @@ celery.conf.task_reject_on_worker_lost = True
 celery.conf.worker_disable_rate_limits = True
 celery.conf.task_always_eager = False
 celery.conf.task_eager_propagates = True
+
+# Disable problematic features
+celery.conf.worker_enable_remote_control = False
+celery.conf.worker_send_task_events = False
 
 # Only accept registered tasks
 celery.conf.task_routes = {
@@ -120,12 +125,6 @@ def celery_colopriming_analysis(self, colopriming_site, record_id):
             log_build_to_suit_task(colopriming_site, task_id, "STARTED", f"Attempt {retries + 1}/4")
 
         logger.info(f"🚀 Starting colopriming analysis task: {task_id} for record: {record_id} (attempt {retries + 1}/4) | Site Type: {site_type}")
-
-        # Immediately update status to show task is being processed
-        self.update_state(
-            state='PROCESSING',
-            meta={'current': 0, 'total': 100, 'status': f'Task received and processing {site_type}...'}
-        )
 
         # Get or create event loop safely
         loop = get_or_create_event_loop()
