@@ -479,12 +479,17 @@ async def handle_celery_bulk_upload(
             data = {}
             for key in row:
                 if key in ["site_type", "site_id", "operator"]:
-                    data[key] = str(row[key])
+                    data[key] = str(row[key]) if row[key] is not None else ""
                 else:
                     try:
-                        data[key] = float(row[key])  # Convert numerical fields
-                    except ValueError:
-                        data[key] = row[key]  # Keep as string if conversion fails
+                        # Check if value is None, empty string, or whitespace only
+                        if row[key] is None or str(row[key]).strip() == "":
+                            data[key] = None
+                        else:
+                            data[key] = float(row[key])  # Convert numerical fields
+                    except (ValueError, TypeError):
+                        # Keep as original value if conversion fails
+                        data[key] = row[key] if row[key] is not None else None
             sites.append(data)
 
         buffer.close()
