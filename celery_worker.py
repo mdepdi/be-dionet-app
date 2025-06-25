@@ -11,6 +11,11 @@ from io import StringIO
 import traceback
 import pandas as pd
 from datetime import datetime
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 celery = Celery(__name__)
 celery.conf.broker_url = os.environ.get('CELERY_BROKER_URL')
@@ -25,13 +30,14 @@ celery.conf.enable_utc = True
 celery.conf.task_track_started = True
 celery.conf.task_send_sent_event = True
 
-# Set task time limits
-celery.conf.task_time_limit = 1800  # 30 minutes hard limit
-celery.conf.task_soft_time_limit = 1500  # 25 minutes soft limit
+# Set task time limits - increased for build-to-suit processing
+celery.conf.task_time_limit = int(os.environ.get('CELERY_TASK_TIME_LIMIT', 3600))  # 1 hour hard limit
+celery.conf.task_soft_time_limit = int(os.environ.get('CELERY_TASK_SOFT_TIME_LIMIT', 3300))  # 55 minutes soft limit
 
 # Worker settings
-celery.conf.worker_prefetch_multiplier = 1
+celery.conf.worker_prefetch_multiplier = int(os.environ.get('CELERY_WORKER_PREFETCH_MULTIPLIER', 1))
 celery.conf.worker_max_tasks_per_child = 1000
+celery.conf.worker_concurrency = int(os.environ.get('CELERY_WORKER_CONCURRENCY', 4))
 
 # Ignore unknown tasks
 celery.conf.task_ignore_result = False
@@ -47,8 +53,38 @@ celery.conf.task_routes = {
 # Reject unknown tasks
 celery.conf.task_reject_on_worker_lost = True
 
+# Handle unknown tasks properly
+celery.conf.task_ignore_result = False
+celery.conf.task_store_errors_even_if_ignored = True
+
+# Add additional worker settings for stability
+celery.conf.worker_disable_rate_limits = True
+celery.conf.task_always_eager = False
+celery.conf.task_eager_propagates = True
+
+def log_build_to_suit_task(colopriming_site, task_id, status, message=""):
+    """Helper function to log build-to-suit specific information"""
+    site_type = colopriming_site.get('site_type', 'unknown')
+    site_id = colopriming_site.get('site_id', 'unknown')
+
+    log_msg = f"🏗️  BUILD-TO-SUIT [{status}] Task {task_id[:8]}... | Site: {site_id} | Type: {site_type}"
+    if message:
+        log_msg += f" | {message}"
+
+    if status == "ERROR":
+        logger.error(log_msg)
+    elif status == "WARNING":
+        logger.warning(log_msg)
+    else:
+        logger.info(log_msg)
+
 async def async_colopriming_analysis(colopriming_site, record_id, task_id, task):
     await asyncio.sleep(1)  # Properly await sleep
+
+    # Special handling for build-to-suit
+    if colopriming_site.get('site_type') == 'build-to-suit':
+        log_build_to_suit_task(colopriming_site, task_id, "PROCESSING", "Starting build-to-suit analysis")
+
     update = {'task_id': task_id, 'status': "STARTED",'created_at' : datetime.now()}
     await update_record(pColopriming,record_id, update)
     result = await colopriming_analysis(colopriming_site, record_id, task_id, task, 'background', False)
@@ -62,7 +98,18 @@ def celery_colopriming_analysis(self, colopriming_site, record_id):
         task = AsyncResult(task_id)
         retries = self.request.retries
 
-        print(f"🚀 Starting colopriming analysis task: {task_id} for record: {record_id} (attempt {retries + 1}/4)")
+        # Enhanced logging for build-to-suit tasks
+        site_type = colopriming_site.get('site_type', 'unknown')
+        if site_type == 'build-to-suit':
+            log_build_to_suit_task(colopriming_site, task_id, "STARTED", f"Attempt {retries + 1}/4")
+
+        logger.info(f"🚀 Starting colopriming analysis task: {task_id} for record: {record_id} (attempt {retries + 1}/4) | Site Type: {site_type}")
+
+        # Immediately update status to show task is being processed
+        self.update_state(
+            state='PROCESSING',
+            meta={'current': 0, 'total': 100, 'status': f'Task received and processing {site_type}...'}
+        )
 
         # Create new event loop for this task
         try:
@@ -86,10 +133,16 @@ def celery_colopriming_analysis(self, colopriming_site, record_id):
         return result
 
     except Exception as e:
-        error_msg = f"❌ Colopriming analysis task failed: {str(e)}"
-        print(error_msg)
+        site_type = colopriming_site.get('site_type', 'unknown')
+        error_msg = f"❌ Colopriming analysis task failed ({site_type}): {str(e)}"
+
+        # Enhanced error logging for build-to-suit
+        if site_type == 'build-to-suit':
+            log_build_to_suit_task(colopriming_site, task_id, "ERROR", f"Attempt {self.request.retries + 1}/4 failed: {str(e)}")
+
+        logger.error(error_msg)
         tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-        print(f"Traceback: {tb_str}")
+        logger.error(f"Traceback: {tb_str}")
 
         # Update record status to FAILURE on final failure
         if self.request.retries >= 3:
@@ -97,10 +150,15 @@ def celery_colopriming_analysis(self, colopriming_site, record_id):
                 loop = asyncio.get_event_loop()
                 loop.run_until_complete(update_record(pColopriming, record_id, {
                     'status': 'FAILURE',
-                    'error_message': f"{error_msg}\n{tb_str}"
+                    'error_message': f"{error_msg}\n{tb_str}",
+                    'site_type': site_type  # Include site_type in error record
                 }))
+
+                if site_type == 'build-to-suit':
+                    log_build_to_suit_task(colopriming_site, task_id, "FAILED", "Max retries exceeded")
+
             except Exception as update_error:
-                print(f"⚠️  Warning: Could not update failure status: {update_error}")
+                logger.warning(f"⚠️  Warning: Could not update failure status: {update_error}")
 
         raise self.retry(exc=e)
 

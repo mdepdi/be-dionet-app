@@ -4,6 +4,7 @@ import srtm
 import gpxpy
 import gpxpy.gpx
 import math
+import asyncio
 from shapely.geometry import Point, Polygon, LineString, JOIN_STYLE, MultiPolygon
 import geojson
 import numpy as np
@@ -53,7 +54,7 @@ def CoverageRadius(tower_height, h_min=5, h_max=72, r_min=0, r_max=2500):
     c = r_min - m * h_min
     # Calculate the coverage radius
     coverage_radius = m * tower_height + c
-    
+
     # Ensure the radius doesn't exceed r_max
     return min(coverage_radius, r_max)
 
@@ -338,7 +339,7 @@ async def sectoralElevationProfile(Longitude, Latitude, towerHeight, steps, sect
         Longitude, Latitude, steps, sectors, coverageRadius)
     elevationSectoral = await elevationProfile(
         elevation_data, Longitude, Latitude, lineSectoral)
-    
+
     elevationSectoral = elevationSectoral[elevationSectoral['distance_to_center'] <= coverageRadius].reset_index(drop=True)
     distanceList = list(elevationSectoral['distance_to_center'].unique())
 
@@ -346,7 +347,7 @@ async def sectoralElevationProfile(Longitude, Latitude, towerHeight, steps, sect
 
     async with asyncio.TaskGroup() as tg:
         tasks = [tg.create_task(process_topo_detention(distance, towerHeight, coverageRadius, reduceFactor, centerHeight)) for distance in distanceList]
-        
+
         for task in tasks:
             topoDetentions.append(await task)
 
@@ -357,7 +358,7 @@ async def sectoralElevationProfile(Longitude, Latitude, towerHeight, steps, sect
 
     async with asyncio.TaskGroup() as tg:
         tasks = [tg.create_task(process_sector(i, elevationSectoral, topoDetentions, coverageRadius)) for i in lineId]
-        
+
         for task in tasks:
             d, td, min_el, max_el, line_elevation= await task
             topoDetentionHeight.append(td)
@@ -438,7 +439,7 @@ async def sectoralElevationProfile(Longitude, Latitude, towerHeight, steps, sect
 
     elevationRecap = {'coverageArea': dissolved_gdf['area'].sum(), 'topTowerElevation': centerHeight+towerHeight, 'minCoverageElevation': round(min(
         lastCoords['minElevation'])), 'maxCoverageElevation': round(max(lastCoords['maxElevation'])), 'coverageRadius': coverageRadius, 'coveragePerBufferArea': CoveragePerBufferArea}
-    
+
     dissolved_gdf.reset_index(drop=True)
 
     # return dissolved_gdf, lastCoords, lineSectoral, elevationSectoral, elevationRecap
@@ -491,7 +492,7 @@ def genSectoral(Longitude, Latitude, steps, sectors, radius):
         # create polygon feature
         polygon_features.append(geojson.Feature(
             geometry=Polygon(segment_vertices)))
-        
+
         # create center line feature
         center_line_vertices = [polar_point(center, start + x * sector_width + sector_width / 2, 0),
                                 polar_point(center, start + x * sector_width + sector_width / 2, rad)]
@@ -563,7 +564,7 @@ def genQuadranSectoral(site_loc, data):
             k = 12
 
         kuadran.append(k)
-    
+
     # Ensure using .loc for setting values
     data = data.copy()
     data.loc[:, 'kuadran'] = kuadran
@@ -628,16 +629,16 @@ def genQuadranSectoral(site_loc, data):
         s1['type'] = 1
         gdf_result.append(s1)
         s2 = gdf[(gdf['iterasi'] == i) & (gdf['kuadran'] == row['kuadran+1'])]
-        s2['type'] = 2 
+        s2['type'] = 2
         gdf_result.append(s2)
         s3 = gdf[(gdf['iterasi'] == i) & (gdf['kuadran'] == row['kuadran-1'])]
-        s3['type'] = 2 
+        s3['type'] = 2
         gdf_result.append(s3)
         s4 = gdf[(gdf['iterasi'] == i) & (gdf['kuadran'] == row['kuadran+2'])]
-        s4['type'] = 3 
+        s4['type'] = 3
         gdf_result.append(s4)
         s5 = gdf[(gdf['iterasi'] == i) & (gdf['kuadran'] == row['kuadran-2'])]
-        s5['type'] = 3 
+        s5['type'] = 3
         gdf_result.append(s5)
 
     sCon = pd.concat(gdf_result, ignore_index=True)
@@ -649,7 +650,7 @@ def genQuadranSectoral(site_loc, data):
     for kd in range(1,13):
         kdf = gdf_final[gdf_final['kuadran'] == kd].reset_index(drop=True)
         final = pd.concat([final, kdf.head(1)], ignore_index=True)
-    
+
     final = final.to_crs('epsg:3857')
     final['area'] = final['geometry'].area
     final = final.to_crs('epsg:4326')
@@ -670,13 +671,13 @@ def genQuadranSectoral(site_loc, data):
         else:
             start = final[final['kuadran'].isin(range(kd, kd+4))].reset_index(drop=True)
             obj['sum_distance'] = start['distance'].sum()
-        
+
         startKuadran.append(obj)
 
     startKuadran = pd.DataFrame(startKuadran)
     startKuadran = startKuadran.sort_values(by=['sum_distance'], ascending=False).reset_index(drop=True)
     startKuadran = startKuadran['kuadran'].values[0]
-    
+
     def get_sector_ranges(start):
         sector_ranges = []
         for i in range(3):
@@ -684,7 +685,7 @@ def genQuadranSectoral(site_loc, data):
             start = (start + 4) % 12
         return sector_ranges
 
-    
+
     sector_ranges = get_sector_ranges(startKuadran-1)
     sector1 = final[final['kuadran'].isin(sector_ranges[0])].reset_index(drop=True)
     sector1['sector'] = 1
@@ -699,10 +700,10 @@ def genQuadranSectoral(site_loc, data):
     # data = data.drop('Unnamed: 0', axis=1)
     sectoral_df = []
     sectoral_features = []
-    
+
     sectoral_sectors = 3
     sectoral_steps = 120
-    
+
     if startKuadran == 1:
         sectoral_start = 0.0
         sectoral_end = 360.0
@@ -739,7 +740,7 @@ def genQuadranSectoral(site_loc, data):
     elif startKuadran == 12:
         sectoral_start = 330.0
         sectoral_end = sectoral_start+360
-    
+
     if sectoral_start > sectoral_end:
         sectoral_start = sectoral_start - 360
     # Ensure the end angle wraps around if it exceeds 360 degrees
@@ -818,7 +819,7 @@ def genQuadranSectoral(site_loc, data):
                 azimuth_end = azimuth_end-360
             sectoral_df_filtered.at[i, 'azimuth_start'] = azimuth_start
             sectoral_df_filtered.at[i, 'azimuth_end'] = azimuth_end
-    
+
     return sectoral_df_filtered
 
 def dRatio(ka, kb, quad_distance):
@@ -831,7 +832,7 @@ def dRatio(ka, kb, quad_distance):
 
 def strObjToJson(strObj):
     return json.loads(strObj.replace("'",'"'))
-    
+
 
 def genMarketShareCompetition(site_loc, operator, nearest_surrounding_site, mColopriming, mOperatorData, village):
     comid_village = village['comid_village'].values[0]
@@ -844,7 +845,7 @@ def genMarketShareCompetition(site_loc, operator, nearest_surrounding_site, mCol
     if nearest_surrounding_distance > 1000:
         siteLocBufferCompetitor = drawBuffer(
             site_loc.x, site_loc.y, 1000)
-    
+
     operatorWithin = gpd.overlay(
         mOperatorData, siteLocBufferCompetitor, how='intersection').reset_index(drop=True)
     operatorWithinList = sorted(set(list(operatorWithin['operator'])))
@@ -858,12 +859,12 @@ def genMarketShareCompetition(site_loc, operator, nearest_surrounding_site, mCol
 
     coloprimingWithin = gpd.overlay(mColopriming, siteLocBufferCompetitor, how='intersection').reset_index(drop=True)
     coloprimingWithin["tenant"] = coloprimingWithin["tenant"].apply(strObjToJson)
-    
+
     tenantList = []
 
     for i , row in coloprimingWithin.iterrows():
         tenantList += row['tenant']['tenant']
-    
+
     operatorCountList = list(set(operatorCountList + tenantList))
     ms_type = marketShareType(operatorCountList)
     with Session() as session:
@@ -934,7 +935,7 @@ def genReverseRevenue(total_sectoral_population, sectoral_population, market_sha
                 grade = 'GOLD'
             elif total_revenue > 750000000:
                 grade = 'PLATINUM'
-    
+
     return [total_revenue, sectoral_population, grade]
 
 
@@ -942,7 +943,7 @@ def genRevenue(total_sectoral_population, sectoral_population, market_share_comp
     if 'actual_revenue' in surrounding_sectoral.columns:
         surrounding_sectoral['actual_revenue'] = surrounding_sectoral['actual_revenue'].astype(float)
         surrounding_sectoral = surrounding_sectoral[surrounding_sectoral['actual_revenue'] > 0]
-    
+
     market_share_opeator = market_share_competition[operator]
 
     total_revenue = total_sectoral_population * market_share_opeator * arpu * area_factor
@@ -952,13 +953,13 @@ def genRevenue(total_sectoral_population, sectoral_population, market_share_comp
 
     try:
         max_actual_revenue = max(surrounding_sectoral['actual_revenue'])
-        
+
         if total_revenue > max_actual_revenue:
             total_revenue = max_actual_revenue*0.85
             pass_max_actual_revenue = 1
     except Exception as e:
         pass
-    
+
     for i, row in sectoral_population.iterrows():
         sectoral_population.at[i, 'total_revenue'] = int(row['total_population'] * market_share_opeator * arpu * area_factor)
 
@@ -996,7 +997,7 @@ def genRevenue(total_sectoral_population, sectoral_population, market_share_comp
                 grade = 'GOLD'
             elif total_revenue > 750000000:
                 grade = 'PLATINUM'
-    
+
     return [total_revenue, sectoral_population, grade,pass_max_actual_revenue]
 
 
