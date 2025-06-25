@@ -16,6 +16,22 @@ celery = Celery(__name__)
 celery.conf.broker_url = os.environ.get('CELERY_BROKER_URL')
 celery.conf.result_backend = os.environ.get('CELERY_RESULT_BACKEND')
 celery.conf.task_serializer = 'json'
+celery.conf.accept_content = ['json']
+celery.conf.result_serializer = 'json'
+celery.conf.timezone = 'UTC'
+celery.conf.enable_utc = True
+
+# Add task tracking
+celery.conf.task_track_started = True
+celery.conf.task_send_sent_event = True
+
+# Set task time limits
+celery.conf.task_time_limit = 1800  # 30 minutes hard limit
+celery.conf.task_soft_time_limit = 1500  # 25 minutes soft limit
+
+# Worker settings
+celery.conf.worker_prefetch_multiplier = 1
+celery.conf.worker_max_tasks_per_child = 1000
 
 async def async_colopriming_analysis(colopriming_site, record_id, task_id, task):
     await asyncio.sleep(1)  # Properly await sleep
@@ -26,13 +42,27 @@ async def async_colopriming_analysis(colopriming_site, record_id, task_id, task)
 
 @celery.task
 def celery_colopriming_anaysis(colopriming_site, record_id):
-    task_id = celery_colopriming_anaysis.request.id
-    task = AsyncResult(task_id)
-    # Use the default event loop
-    loop = asyncio.get_event_loop()
-    # Run the async function in the event loop
-    result = loop.run_until_complete(async_colopriming_analysis(colopriming_site, record_id, task_id, task))
-    return result
+    try:
+        task_id = celery_colopriming_anaysis.request.id
+        task = AsyncResult(task_id)
+        print(f"🚀 Starting colopriming analysis task: {task_id} for record: {record_id}")
+
+        # Create new event loop for this task
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        # Run the async function in the event loop
+        result = loop.run_until_complete(async_colopriming_analysis(colopriming_site, record_id, task_id, task))
+        print(f"✅ Colopriming analysis completed for record: {record_id}")
+        return result
+    except Exception as e:
+        print(f"❌ Colopriming analysis task failed: {str(e)}")
+        tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+        print(f"Traceback: {tb_str}")
+        raise e
 
 async def async_colopriming_analysis_siro(colopriming_site, record_id, task_id, task):
     await asyncio.sleep(1)  # Properly await sleep
@@ -43,13 +73,27 @@ async def async_colopriming_analysis_siro(colopriming_site, record_id, task_id, 
 
 @celery.task
 def celery_colopriming_anaysis_siro(colopriming_site, record_id):
-    task_id = celery_colopriming_anaysis_siro.request.id
-    task = AsyncResult(task_id)
-    # Use the default event loop
-    loop = asyncio.get_event_loop()
-    # Run the async function in the event loop
-    result = loop.run_until_complete(async_colopriming_analysis_siro(colopriming_site, record_id, task_id, task))
-    return result
+    try:
+        task_id = celery_colopriming_anaysis_siro.request.id
+        task = AsyncResult(task_id)
+        print(f"🚀 Starting siro analysis task: {task_id} for record: {record_id}")
+
+        # Create new event loop for this task
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        # Run the async function in the event loop
+        result = loop.run_until_complete(async_colopriming_analysis_siro(colopriming_site, record_id, task_id, task))
+        print(f"✅ Siro analysis completed for record: {record_id}")
+        return result
+    except Exception as e:
+        print(f"❌ Siro analysis task failed: {str(e)}")
+        tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+        print(f"Traceback: {tb_str}")
+        raise e
 
 
 async def async_bulk_colopriming_analysis(job_id, sites_data, output_filename):
@@ -179,12 +223,43 @@ def celery_bulk_colopriming_analysis(job_id, sites_data, output_filename):
     """
     Celery task for bulk colopriming analysis
     """
-    task_id = celery_bulk_colopriming_analysis.request.id
+    try:
+        task_id = celery_bulk_colopriming_analysis.request.id
+        print(f"🚀 Starting bulk analysis task: {task_id} for job: {job_id}")
 
-    # Update job with task_id
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(update_bulk_job(job_id, {'task_id': task_id}))
+        # Create new event loop for this task
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
-    # Run the async bulk analysis
-    result = loop.run_until_complete(async_bulk_colopriming_analysis(job_id, sites_data, output_filename))
-    return result
+        # Update job with task_id
+        print(f"📝 Updating job {job_id} with task_id: {task_id}")
+        loop.run_until_complete(update_bulk_job(job_id, {'task_id': task_id}))
+
+        # Run the async bulk analysis
+        print(f"⚡ Running bulk analysis for {len(sites_data)} sites")
+        result = loop.run_until_complete(async_bulk_colopriming_analysis(job_id, sites_data, output_filename))
+
+        print(f"✅ Bulk analysis completed successfully for job: {job_id}")
+        return result
+
+    except Exception as e:
+        error_msg = f"❌ Celery task failed: {str(e)}"
+        print(error_msg)
+        tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+        print(f"Traceback: {tb_str}")
+
+        # Try to update the job status to FAILURE
+        try:
+            if 'loop' in locals():
+                loop.run_until_complete(update_bulk_job(job_id, {
+                    'status': 'FAILURE',
+                    'error_message': f"{error_msg}\n{tb_str}",
+                    'finished_at': datetime.now()
+                }))
+        except Exception as update_error:
+            print(f"Failed to update job status: {update_error}")
+
+        raise e
