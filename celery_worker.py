@@ -1,10 +1,14 @@
 from celery import Celery
 import os
-from module import *
 from celery.result import AsyncResult
 import asyncio
 from database import *
 from modules.database_actions import *
+from module import (
+    colopriming_analysis,
+    colopriming_siro_analysis,
+    bulk_colopriming_analysis
+)
 import uuid
 import csv
 from io import StringIO
@@ -35,55 +39,44 @@ celery.conf.task_time_limit = int(os.environ.get('CELERY_TASK_TIME_LIMIT', 3600)
 celery.conf.task_soft_time_limit = int(os.environ.get('CELERY_TASK_SOFT_TIME_LIMIT', 3300))  # 55 minutes soft limit
 
 # Worker settings
+celery.conf.worker_prefetch_multiplier = int(os.environ.get('CELERY_WORKER_PREFETCH_MULTIPLIER', 1))
 celery.conf.worker_max_tasks_per_child = 1000
 celery.conf.worker_concurrency = int(os.environ.get('CELERY_WORKER_CONCURRENCY', 4))
 
-# Ignore unknown tasks
+# Improved task handling settings
 celery.conf.task_ignore_result = False
 celery.conf.task_store_errors_even_if_ignored = True
+celery.conf.task_reject_on_worker_lost = True
+celery.conf.worker_disable_rate_limits = True
+celery.conf.task_always_eager = False
+celery.conf.task_eager_propagates = True
 
-# Only accept tasks that are registered
+# Only accept registered tasks
 celery.conf.task_routes = {
     'celery_colopriming_analysis': {'queue': 'celery'},
     'celery_colopriming_analysis_siro': {'queue': 'celery'},
     'celery_bulk_colopriming_analysis': {'queue': 'celery'},
 }
 
-# Handle unknown/unregistered tasks
-celery.conf.task_ignore_result = False
-celery.conf.task_store_errors_even_if_ignored = True
-
-# Reject unknown tasks
-celery.conf.task_reject_on_worker_lost = True
-
-# Add task filtering to ignore known problematic tasks
-celery.conf.task_ignore_results = [
-    'reports.scheduler',  # Ignore reports.scheduler task
-]
-
-# Configure worker to only process known tasks
-celery.conf.worker_direct = True
-celery.conf.task_default_queue = 'celery'
-celery.conf.task_default_exchange = 'celery'
-celery.conf.task_default_exchange_type = 'direct'
-celery.conf.task_default_routing_key = 'celery'
-
-# Increase task rejection timeout
-celery.conf.task_reject_on_worker_lost = True
-celery.conf.task_acks_late = True
-celery.conf.worker_prefetch_multiplier = 1
-
-# Add additional worker settings for stability
-celery.conf.worker_disable_rate_limits = True
-celery.conf.task_always_eager = False
-celery.conf.task_eager_propagates = True
-
-# List of known problematic tasks to ignore
-IGNORED_TASKS = [
-    'reports.scheduler',
-    'periodic_tasks.cleanup',
-    'maintenance.scheduler',
-]
+def get_or_create_event_loop():
+    """
+    Safely get or create an event loop for async operations
+    This prevents issues with event loop reuse in celery tasks
+    """
+    try:
+        # Try to get the current event loop
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No event loop running, create a new one
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop is closed")
+        except RuntimeError:
+            # Create new event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+    return loop
 
 def log_build_to_suit_task(colopriming_site, task_id, status, message=""):
     """Helper function to log build-to-suit specific information"""
@@ -100,42 +93,6 @@ def log_build_to_suit_task(colopriming_site, task_id, status, message=""):
         logger.warning(log_msg)
     else:
         logger.info(log_msg)
-
-# Custom task handler for unknown tasks
-@celery.signals.task_unknown.connect
-def task_unknown_handler(sender=None, name=None, id=None, message=None, exc=None, **kwargs):
-    """Handle unknown tasks gracefully"""
-    if name in IGNORED_TASKS:
-        logger.info(f"🔇 Ignoring known problematic task: {name} (ID: {id})")
-        return
-
-    logger.warning(f"⚠️  Unknown task received: {name} (ID: {id})")
-    logger.debug(f"Task message: {message}")
-
-# Handle task failures more gracefully
-@celery.signals.task_failure.connect
-def task_failure_handler(sender=None, task_id=None, exception=None, traceback=None, einfo=None, **kwargs):
-    """Enhanced task failure handling"""
-    logger.error(f"💥 Task failed: {sender} (ID: {task_id})")
-    logger.error(f"Exception: {exception}")
-    if traceback:
-        logger.error(f"Traceback: {traceback}")
-
-# Log successful tasks
-@celery.signals.task_success.connect
-def task_success_handler(sender=None, result=None, **kwargs):
-    """Log successful task completion"""
-    task_name = sender.__name__ if hasattr(sender, '__name__') else str(sender)
-    if 'colopriming' in task_name.lower():
-        logger.info(f"✅ Task completed successfully: {task_name}")
-
-# Worker ready signal
-@celery.signals.worker_ready.connect
-def worker_ready_handler(sender=None, **kwargs):
-    """Log when worker is ready"""
-    logger.info("🚀 DIONET Celery worker is ready!")
-    logger.info(f"Registered tasks: {list(celery.tasks.keys())}")
-    logger.info(f"Ignored tasks: {IGNORED_TASKS}")
 
 async def async_colopriming_analysis(colopriming_site, record_id, task_id, task):
     await asyncio.sleep(1)  # Properly await sleep
@@ -170,12 +127,8 @@ def celery_colopriming_analysis(self, colopriming_site, record_id):
             meta={'current': 0, 'total': 100, 'status': f'Task received and processing {site_type}...'}
         )
 
-        # Create new event loop for this task
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # Get or create event loop safely
+        loop = get_or_create_event_loop()
 
         # Update task status to STARTED immediately
         try:
@@ -184,11 +137,11 @@ def celery_colopriming_analysis(self, colopriming_site, record_id):
                 'task_id': task_id
             }))
         except Exception as update_error:
-            print(f"⚠️  Warning: Could not update task status: {update_error}")
+            logger.warning(f"⚠️  Warning: Could not update task status: {update_error}")
 
         # Run the async function in the event loop
         result = loop.run_until_complete(async_colopriming_analysis(colopriming_site, record_id, task_id, task))
-        print(f"✅ Colopriming analysis completed for record: {record_id}")
+        logger.info(f"✅ Colopriming analysis completed for record: {record_id}")
         return result
 
     except Exception as e:
@@ -197,7 +150,7 @@ def celery_colopriming_analysis(self, colopriming_site, record_id):
 
         # Enhanced error logging for build-to-suit
         if site_type == 'build-to-suit':
-            log_build_to_suit_task(colopriming_site, task_id, "ERROR", f"Attempt {self.request.retries + 1}/4 failed: {str(e)}")
+            log_build_to_suit_task(colopriming_site, self.request.id, "ERROR", f"Attempt {self.request.retries + 1}/4 failed: {str(e)}")
 
         logger.error(error_msg)
         tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
@@ -206,7 +159,7 @@ def celery_colopriming_analysis(self, colopriming_site, record_id):
         # Update record status to FAILURE on final failure
         if self.request.retries >= 3:
             try:
-                loop = asyncio.get_event_loop()
+                loop = get_or_create_event_loop()
                 loop.run_until_complete(update_record(pColopriming, record_id, {
                     'status': 'FAILURE',
                     'error_message': f"{error_msg}\n{tb_str}",
@@ -214,7 +167,7 @@ def celery_colopriming_analysis(self, colopriming_site, record_id):
                 }))
 
                 if site_type == 'build-to-suit':
-                    log_build_to_suit_task(colopriming_site, task_id, "FAILED", "Max retries exceeded")
+                    log_build_to_suit_task(colopriming_site, self.request.id, "FAILED", "Max retries exceeded")
 
             except Exception as update_error:
                 logger.warning(f"⚠️  Warning: Could not update failure status: {update_error}")
@@ -233,23 +186,19 @@ def celery_colopriming_analysis_siro(self, colopriming_site, record_id):
     try:
         task_id = self.request.id
         task = AsyncResult(task_id)
-        print(f"🚀 Starting siro analysis task: {task_id} for record: {record_id}")
+        logger.info(f"🚀 Starting siro analysis task: {task_id} for record: {record_id}")
 
-        # Create new event loop for this task
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # Get or create event loop safely
+        loop = get_or_create_event_loop()
 
         # Run the async function in the event loop
         result = loop.run_until_complete(async_colopriming_analysis_siro(colopriming_site, record_id, task_id, task))
-        print(f"✅ Siro analysis completed for record: {record_id}")
+        logger.info(f"✅ Siro analysis completed for record: {record_id}")
         return result
     except Exception as e:
-        print(f"❌ Siro analysis task failed: {str(e)}")
+        logger.error(f"❌ Siro analysis task failed: {str(e)}")
         tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-        print(f"Traceback: {tb_str}")
+        logger.error(f"Traceback: {tb_str}")
         raise e
 
 
@@ -382,41 +331,37 @@ def celery_bulk_colopriming_analysis(self, job_id, sites_data, output_filename):
     """
     try:
         task_id = self.request.id
-        print(f"🚀 Starting bulk analysis task: {task_id} for job: {job_id}")
+        logger.info(f"🚀 Starting bulk analysis task: {task_id} for job: {job_id}")
 
-        # Create new event loop for this task
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # Get or create event loop safely
+        loop = get_or_create_event_loop()
 
         # Update job with task_id
-        print(f"📝 Updating job {job_id} with task_id: {task_id}")
+        logger.info(f"📝 Updating job {job_id} with task_id: {task_id}")
         loop.run_until_complete(update_bulk_job(job_id, {'task_id': task_id}))
 
         # Run the async bulk analysis
-        print(f"⚡ Running bulk analysis for {len(sites_data)} sites")
+        logger.info(f"⚡ Running bulk analysis for {len(sites_data)} sites")
         result = loop.run_until_complete(async_bulk_colopriming_analysis(job_id, sites_data, output_filename))
 
-        print(f"✅ Bulk analysis completed successfully for job: {job_id}")
+        logger.info(f"✅ Bulk analysis completed successfully for job: {job_id}")
         return result
 
     except Exception as e:
         error_msg = f"❌ Celery task failed: {str(e)}"
-        print(error_msg)
+        logger.error(error_msg)
         tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-        print(f"Traceback: {tb_str}")
+        logger.error(f"Traceback: {tb_str}")
 
         # Try to update the job status to FAILURE
         try:
-            if 'loop' in locals():
-                loop.run_until_complete(update_bulk_job(job_id, {
-                    'status': 'FAILURE',
-                    'error_message': f"{error_msg}\n{tb_str}",
-                    'finished_at': datetime.now()
-                }))
+            loop = get_or_create_event_loop()
+            loop.run_until_complete(update_bulk_job(job_id, {
+                'status': 'FAILURE',
+                'error_message': f"{error_msg}\n{tb_str}",
+                'finished_at': datetime.now()
+            }))
         except Exception as update_error:
-            print(f"Failed to update job status: {update_error}")
+            logger.error(f"Failed to update job status: {update_error}")
 
         raise e

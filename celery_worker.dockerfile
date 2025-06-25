@@ -11,5 +11,5 @@ COPY ["database.py","module.py","authentication.py","populate_database.py","cele
 # Create dionet_data directory structure
 RUN mkdir -p /app/dionet_data/step
 
-# Define the default command
-CMD ["celery", "-A", "celery_worker.celery", "worker", "--concurrency=4","--loglevel=info"]
+# Define the default command with better worker settings
+CMD ["celery", "-A", "celery_worker.celery", "worker", "--concurrency=4", "--loglevel=info", "--without-heartbeat", "--without-gossip", "--without-mingle"]
