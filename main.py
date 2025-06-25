@@ -36,7 +36,11 @@ from modules.database_actions import *
 from database import *
 import json
 
-from celery_worker import *
+from celery_worker import (
+    celery_colopriming_analysis,
+    celery_colopriming_analysis_siro,
+    celery_bulk_colopriming_analysis
+)
 
 import shutil
 from pathlib import Path
@@ -179,7 +183,7 @@ async def handle_celery_colopriming_siro(colopriming_site: ColoprimingSite) -> D
 
         record_id = await insert_record(pSiro, project)
 
-        celery_task = celery_colopriming_anaysis_siro.delay(
+        celery_task = celery_colopriming_analysis_siro.delay(
             colopriming_site.model_dump(), record_id)
 
         return {
@@ -215,7 +219,7 @@ async def handle_celery_colopriming(colopriming_site: ColoprimingSite) -> Dict:
 
         record_id = await insert_record(pColopriming, project)
 
-        celery_task = celery_colopriming_anaysis.delay(
+        celery_task = celery_colopriming_analysis.delay(
             colopriming_site.model_dump(), record_id)
 
         return {

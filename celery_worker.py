@@ -33,6 +33,20 @@ celery.conf.task_soft_time_limit = 1500  # 25 minutes soft limit
 celery.conf.worker_prefetch_multiplier = 1
 celery.conf.worker_max_tasks_per_child = 1000
 
+# Ignore unknown tasks
+celery.conf.task_ignore_result = False
+celery.conf.task_store_errors_even_if_ignored = True
+
+# Only accept tasks that are registered
+celery.conf.task_routes = {
+    'celery_colopriming_analysis': {'queue': 'celery'},
+    'celery_colopriming_analysis_siro': {'queue': 'celery'},
+    'celery_bulk_colopriming_analysis': {'queue': 'celery'},
+}
+
+# Reject unknown tasks
+celery.conf.task_reject_on_worker_lost = True
+
 async def async_colopriming_analysis(colopriming_site, record_id, task_id, task):
     await asyncio.sleep(1)  # Properly await sleep
     update = {'task_id': task_id, 'status': "STARTED",'created_at' : datetime.now()}
@@ -40,12 +54,15 @@ async def async_colopriming_analysis(colopriming_site, record_id, task_id, task)
     result = await colopriming_analysis(colopriming_site, record_id, task_id, task, 'background', False)
     return result
 
-@celery.task
-def celery_colopriming_anaysis(colopriming_site, record_id):
+@celery.task(bind=True, name='celery_colopriming_analysis',
+              autoretry_for=(Exception,), retry_kwargs={'max_retries': 3, 'countdown': 60})
+def celery_colopriming_analysis(self, colopriming_site, record_id):
     try:
-        task_id = celery_colopriming_anaysis.request.id
+        task_id = self.request.id
         task = AsyncResult(task_id)
-        print(f"🚀 Starting colopriming analysis task: {task_id} for record: {record_id}")
+        retries = self.request.retries
+
+        print(f"🚀 Starting colopriming analysis task: {task_id} for record: {record_id} (attempt {retries + 1}/4)")
 
         # Create new event loop for this task
         try:
@@ -54,15 +71,38 @@ def celery_colopriming_anaysis(colopriming_site, record_id):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
+        # Update task status to STARTED immediately
+        try:
+            loop.run_until_complete(update_record(pColopriming, record_id, {
+                'status': 'STARTED',
+                'task_id': task_id
+            }))
+        except Exception as update_error:
+            print(f"⚠️  Warning: Could not update task status: {update_error}")
+
         # Run the async function in the event loop
         result = loop.run_until_complete(async_colopriming_analysis(colopriming_site, record_id, task_id, task))
         print(f"✅ Colopriming analysis completed for record: {record_id}")
         return result
+
     except Exception as e:
-        print(f"❌ Colopriming analysis task failed: {str(e)}")
+        error_msg = f"❌ Colopriming analysis task failed: {str(e)}"
+        print(error_msg)
         tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
         print(f"Traceback: {tb_str}")
-        raise e
+
+        # Update record status to FAILURE on final failure
+        if self.request.retries >= 3:
+            try:
+                loop = asyncio.get_event_loop()
+                loop.run_until_complete(update_record(pColopriming, record_id, {
+                    'status': 'FAILURE',
+                    'error_message': f"{error_msg}\n{tb_str}"
+                }))
+            except Exception as update_error:
+                print(f"⚠️  Warning: Could not update failure status: {update_error}")
+
+        raise self.retry(exc=e)
 
 async def async_colopriming_analysis_siro(colopriming_site, record_id, task_id, task):
     await asyncio.sleep(1)  # Properly await sleep
@@ -71,10 +111,10 @@ async def async_colopriming_analysis_siro(colopriming_site, record_id, task_id, 
     result = await colopriming_siro_analysis(colopriming_site, record_id, task_id, task, 'background', True)
     return result
 
-@celery.task
-def celery_colopriming_anaysis_siro(colopriming_site, record_id):
+@celery.task(bind=True, name='celery_colopriming_analysis_siro')
+def celery_colopriming_analysis_siro(self, colopriming_site, record_id):
     try:
-        task_id = celery_colopriming_anaysis_siro.request.id
+        task_id = self.request.id
         task = AsyncResult(task_id)
         print(f"🚀 Starting siro analysis task: {task_id} for record: {record_id}")
 
@@ -218,13 +258,13 @@ async def async_bulk_colopriming_analysis(job_id, sites_data, output_filename):
         raise Exception(full_error)
 
 
-@celery.task
-def celery_bulk_colopriming_analysis(job_id, sites_data, output_filename):
+@celery.task(bind=True, name='celery_bulk_colopriming_analysis')
+def celery_bulk_colopriming_analysis(self, job_id, sites_data, output_filename):
     """
     Celery task for bulk colopriming analysis
     """
     try:
-        task_id = celery_bulk_colopriming_analysis.request.id
+        task_id = self.request.id
         print(f"🚀 Starting bulk analysis task: {task_id} for job: {job_id}")
 
         # Create new event loop for this task
