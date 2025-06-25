@@ -183,8 +183,11 @@ async def handle_celery_colopriming_siro(colopriming_site: ColoprimingSite) -> D
 
         record_id = await insert_record(pSiro, project)
 
-        celery_task = celery_colopriming_analysis_siro.delay(
-            colopriming_site.model_dump(), record_id)
+        celery_task = celery_colopriming_analysis_siro.apply_async(
+            args=[colopriming_site.model_dump(), record_id],
+            queue='dionet_queue',
+            routing_key='dionet.siro'
+        )
 
         return {
             'task_id': celery_task.id,
@@ -219,8 +222,11 @@ async def handle_celery_colopriming(colopriming_site: ColoprimingSite) -> Dict:
 
         record_id = await insert_record(pColopriming, project)
 
-        celery_task = celery_colopriming_analysis.delay(
-            colopriming_site.model_dump(), record_id)
+        celery_task = celery_colopriming_analysis.apply_async(
+            args=[colopriming_site.model_dump(), record_id],
+            queue='dionet_queue',
+            routing_key='dionet.colopriming'
+        )
 
         return {
             'task_id': celery_task.id,
@@ -533,7 +539,11 @@ async def handle_celery_bulk_upload(
 
         # Start Celery task
         output_filename = f"bulk_result_{job_id}"
-        celery_task = celery_bulk_colopriming_analysis.delay(job_id, sites, output_filename)
+        celery_task = celery_bulk_colopriming_analysis.apply_async(
+            args=[job_id, sites, output_filename],
+            queue='dionet_queue',
+            routing_key='dionet.bulk'
+        )
 
         # Update job with task ID
         await update_bulk_job(job_id, {'task_id': celery_task.id})

@@ -11,5 +11,5 @@ COPY ["database.py","module.py","authentication.py","populate_database.py","cele
 # Create dionet_data directory structure
 RUN mkdir -p /app/dionet_data/step
 
-# Define the default command with minimal stable settings
-CMD ["celery", "-A", "celery_worker.celery", "worker", "--pool=solo", "--loglevel=info", "--without-gossip", "--without-mingle", "--without-heartbeat"]
+# Define the command with QUEUE ISOLATION - only listen to dionet_queue
+CMD ["celery", "-A", "celery_worker.celery", "worker", "--pool=solo", "--concurrency=1", "--loglevel=info", "--without-heartbeat", "--without-gossip", "--without-mingle", "--purge", "--queues=dionet_queue"]
