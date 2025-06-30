@@ -8,6 +8,7 @@ from sqlalchemy.inspection import inspect
 from enum import Enum
 import logging
 from tqdm import tqdm
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -102,8 +103,84 @@ def import_m_rwi(db):
             db.commit()
 
 def import_m_colopriming(db):
-    data = gpd.read_parquet(f'./data/tb_colopriming.parquet')
-    # data = gpd.read_parquet(f'{google_cloud_storage_uri}/tb_colopriming.parquet', filesystem=fs)
+    # Try to read CSV file first (uploaded file), then fallback to parquet
+    csv_path = f'./data/tb_colopriming.csv'
+    parquet_path = f'./data/tb_colopriming.parquet'
+
+    data = None
+    file_used = None
+
+    if os.path.exists(csv_path):
+        try:
+            # Read CSV file and convert to GeoDataFrame
+            data = pd.read_csv(csv_path)
+
+            # Validate required columns
+            required_columns = [
+                'site_id', 'site_name', 'latitude', 'longitude', 'address',
+                'id_city', 'comid_city', 'id_province', 'city', 'province',
+                'site_type', 'tower_type', 'tower_height', 'region_area',
+                'region', 'status', 'tenant', 'revenue', 'grade',
+                'comid_city_2500m', 'comid_province_2500m', 'date_updated'
+            ]
+
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                print(f"Warning: Missing columns in CSV: {missing_columns}")
+                print("Available columns:", list(data.columns))
+                # Don't fail, just warn - use default values for missing columns
+
+            # Add missing columns with default values
+            for col in missing_columns:
+                if col in ['id_city', 'comid_city', 'id_province']:
+                    data[col] = 0
+                elif col in ['tower_height']:
+                    data[col] = 0.0
+                elif col in ['revenue']:
+                    data[col] = '0'
+                else:
+                    data[col] = 'N/A'
+
+            # Ensure latitude and longitude are numeric
+            data['latitude'] = pd.to_numeric(data['latitude'], errors='coerce')
+            data['longitude'] = pd.to_numeric(data['longitude'], errors='coerce')
+
+            # Remove rows with invalid lat/lon
+            invalid_coords = data['latitude'].isna() | data['longitude'].isna()
+            if invalid_coords.any():
+                print(f"Warning: Removing {invalid_coords.sum()} rows with invalid coordinates")
+                data = data[~invalid_coords]
+
+            # Check if geometry column exists, if not create it from lat/lon
+            if 'geometry' not in data.columns:
+                data = gpd.GeoDataFrame(
+                    data,
+                    geometry=gpd.points_from_xy(data.longitude, data.latitude),
+                    crs='epsg:4326'
+                )
+            else:
+                data = gpd.GeoDataFrame(data, crs='epsg:4326')
+            file_used = "CSV"
+            print(f"Successfully loaded {len(data)} records from tb_colopriming.csv")
+        except Exception as e:
+            print(f"Failed to read CSV file: {e}")
+            data = None
+
+    # Fallback to parquet if CSV is not available or failed to read
+    if data is None and os.path.exists(parquet_path):
+        try:
+            data = gpd.read_parquet(parquet_path)
+            file_used = "PARQUET"
+            print(f"Fallback: Successfully loaded {len(data)} records from tb_colopriming.parquet")
+        except Exception as e:
+            print(f"Failed to read parquet file: {e}")
+            raise e
+
+    if data is None:
+        raise FileNotFoundError("Neither tb_colopriming.csv nor tb_colopriming.parquet found in ./data/ directory")
+
+    print(f"Processing {len(data)} records from {file_used} file...")
+
     for index, row in tqdm(data.iterrows(), total=len(data)):
         try:
             geometry_wkt = row['geometry'].wkt if row['geometry'] else None
@@ -112,46 +189,144 @@ def import_m_colopriming(db):
             else:
                 geometry_element = None
 
+            # Helper function to safely convert values
+            def safe_str(value, default='N/A'):
+                return str(value) if pd.notna(value) and value != '' else default
+
+            def safe_int(value, default=0):
+                try:
+                    return int(float(value)) if pd.notna(value) and value != '' else default
+                except (ValueError, TypeError):
+                    return default
+
+            def safe_float(value, default=0.0):
+                try:
+                    return float(value) if pd.notna(value) and value != '' else default
+                except (ValueError, TypeError):
+                    return default
+
             model = mColopriming(
-                site_id=str(row['site_id']),
-                site_name=str(row['site_name']),
-                latitude=float(row['latitude']),
-                longitude=float(row['longitude']),
-                address=str(row['address']),
-                id_city=int(row['id_city']),
-                comid_city=int(row['comid_city']),
-                id_province=int(row['id_province']),
-                city=str(row['city']),
-                province=str(row['province']),
-                site_type=str(row['site_type']),
-                tower_type=str(row['tower_type']),
-                tower_height=float(row['tower_height']),
-                antena_height=float(row['tower_height']),
-                region_area=str(row['region_area']),
-                region=str(row['region']),
-                status=str(row['status']),
-                tenant=str(row['tenant']),
-                actual_revenue=str(row['revenue']),
-                grade=str(row['grade']),
-                comid_city_2500m=str(row['comid_city_2500m']),
-                comid_province_2500m=str(row['comid_province_2500m']),
-                date_updated=str(row['date_updated']),
+                site_id=safe_str(row['site_id']),
+                site_name=safe_str(row['site_name']),
+                latitude=safe_float(row['latitude']),
+                longitude=safe_float(row['longitude']),
+                address=safe_str(row['address']),
+                id_city=safe_int(row['id_city']),
+                comid_city=safe_int(row['comid_city']),
+                id_province=safe_int(row['id_province']),
+                city=safe_str(row['city']),
+                province=safe_str(row['province']),
+                site_type=safe_str(row['site_type']),
+                tower_type=safe_str(row['tower_type']),
+                tower_height=safe_float(row['tower_height']),
+                antena_height=safe_float(row['tower_height']),  # Using tower_height as in original
+                region_area=safe_str(row['region_area']),
+                region=safe_str(row['region']),
+                status=safe_str(row['status']),
+                tenant=safe_str(row['tenant']),
+                actual_revenue=safe_str(row['revenue']),
+                grade=safe_str(row['grade']),
+                comid_city_2500m=safe_str(row['comid_city_2500m']),
+                comid_province_2500m=safe_str(row['comid_province_2500m']),
+                date_updated=safe_str(row['date_updated']),
                 active=True,
                 geometry=geometry_element
             )
             db.add(model)
         except Exception as e:
-            print(f"==>> e: {e}")
-            pass
+            print(f"Error processing row {index}: {e}")
+            print(f"Row data: {dict(row)}")
+            continue  # Skip this row and continue with the next
         finally:
-            db.commit()
+            try:
+                db.commit()
+            except Exception as commit_error:
+                print(f"Error committing row {index}: {commit_error}")
+                db.rollback()
 
 
 
 
 def import_m_colopriming_sopt(db):
-    data = gpd.read_parquet(f'./data/tb_colopriming_sopt.parquet')
-    # data = gpd.read_parquet(f'{google_cloud_storage_uri}/tb_colopriming.parquet', filesystem=fs)
+    # Try to read CSV file first (uploaded file), then fallback to parquet
+    csv_path = f'./data/tb_colopriming_sopt.csv'
+    parquet_path = f'./data/tb_colopriming_sopt.parquet'
+
+    data = None
+    file_used = None
+
+    if os.path.exists(csv_path):
+        try:
+            # Read CSV file and convert to GeoDataFrame
+            data = pd.read_csv(csv_path)
+
+            # Validate required columns
+            required_columns = [
+                'site_id', 'site_name', 'latitude', 'longitude', 'address',
+                'id_village', 'id_district', 'id_city', 'id_province',
+                'comid_village', 'comid_district', 'comid_city', 'comid_province',
+                'village', 'district', 'city', 'province',
+                'site_type', 'tower_type', 'tower_height', 'region_area',
+                'region', 'status', 'tenant', 'revenue',
+                'start_rental', 'end_rental', 'date_updated'
+            ]
+
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                print(f"Warning: Missing columns in CSV: {missing_columns}")
+                print("Available columns:", list(data.columns))
+                # Don't fail, just warn - use default values for missing columns
+
+            # Add missing columns with default values
+            for col in missing_columns:
+                if col in ['tower_height', 'revenue']:
+                    data[col] = 0.0
+                elif col in ['id_village', 'id_district', 'id_city', 'id_province',
+                           'comid_village', 'comid_district', 'comid_city', 'comid_province']:
+                    data[col] = 0
+                else:
+                    data[col] = 'N/A'
+
+            # Ensure latitude and longitude are numeric
+            data['latitude'] = pd.to_numeric(data['latitude'], errors='coerce')
+            data['longitude'] = pd.to_numeric(data['longitude'], errors='coerce')
+
+            # Remove rows with invalid lat/lon
+            invalid_coords = data['latitude'].isna() | data['longitude'].isna()
+            if invalid_coords.any():
+                print(f"Warning: Removing {invalid_coords.sum()} rows with invalid coordinates")
+                data = data[~invalid_coords]
+
+            # Check if geometry column exists, if not create it from lat/lon
+            if 'geometry' not in data.columns:
+                data = gpd.GeoDataFrame(
+                    data,
+                    geometry=gpd.points_from_xy(data.longitude, data.latitude),
+                    crs='epsg:4326'
+                )
+            else:
+                data = gpd.GeoDataFrame(data, crs='epsg:4326')
+            file_used = "CSV"
+            print(f"Successfully loaded {len(data)} records from tb_colopriming_sopt.csv")
+        except Exception as e:
+            print(f"Failed to read CSV file: {e}")
+            data = None
+
+    # Fallback to parquet if CSV is not available or failed to read
+    if data is None and os.path.exists(parquet_path):
+        try:
+            data = gpd.read_parquet(parquet_path)
+            file_used = "PARQUET"
+            print(f"Fallback: Successfully loaded {len(data)} records from tb_colopriming_sopt.parquet")
+        except Exception as e:
+            print(f"Failed to read parquet file: {e}")
+            raise e
+
+    if data is None:
+        raise FileNotFoundError("Neither tb_colopriming_sopt.csv nor tb_colopriming_sopt.parquet found in ./data/ directory")
+
+    print(f"Processing {len(data)} records from {file_used} file...")
+
     for index, row in tqdm(data.iterrows(), total=len(data)):
         try:
             geometry_wkt = row['geometry'].wkt if row['geometry'] else None
@@ -160,53 +335,142 @@ def import_m_colopriming_sopt(db):
             else:
                 geometry_element = None
 
+            # Helper function to safely convert values
+            def safe_str(value, default='N/A'):
+                return str(value) if pd.notna(value) and value != '' else default
+
+            def safe_int(value, default=0):
+                try:
+                    return int(float(value)) if pd.notna(value) and value != '' else default
+                except (ValueError, TypeError):
+                    return default
+
+            def safe_float(value, default=0.0):
+                try:
+                    return float(value) if pd.notna(value) and value != '' else default
+                except (ValueError, TypeError):
+                    return default
 
             model = mColoprimingSopt(
-                site_id=str(row['site_id']),
-                site_name=str(row['site_name']),
-                latitude=float(row['latitude']),
-                longitude=float(row['longitude']),
-                address=str(row['address']),
-                id_village=str(row['id_village']),
-                id_district=str(row['id_district']),
-                id_city=str(row['id_city']),
-                id_province=str(row['id_province']),
-                comid_village=str(row['comid_village']),
-                comid_district=str(row['comid_district']),
-                comid_city=str(row['comid_city']),
-                comid_province=str(row['comid_province']),
-                village=str(row['village']),
-                district=str(row['district']),
-                city=str(row['city']),
-                province=str(row['province']),
-                site_type=str(row['site_type']),
-                tower_type=str(row['tower_type']),
-                tower_height=float(row['tower_height']),
-                antena_height=float(row['tower_height']),
-                region_area=str(row['region_area']),
-                region=str(row['region']),
-                status=str(row['status']),
-                tenant=str(row['tenant']),
-                actual_revenue=float(row['revenue']),
-                start_rental=str(row['start_rental']),
-                end_rental=str(row['end_rental']),
-                date_updated=str(row['date_updated']),
+                site_id=safe_str(row['site_id']),
+                site_name=safe_str(row['site_name']),
+                latitude=safe_float(row['latitude']),
+                longitude=safe_float(row['longitude']),
+                address=safe_str(row['address']),
+                id_village=safe_str(row['id_village']),
+                id_district=safe_str(row['id_district']),
+                id_city=safe_str(row['id_city']),
+                id_province=safe_str(row['id_province']),
+                comid_village=safe_str(row['comid_village']),
+                comid_district=safe_str(row['comid_district']),
+                comid_city=safe_str(row['comid_city']),
+                comid_province=safe_str(row['comid_province']),
+                village=safe_str(row['village']),
+                district=safe_str(row['district']),
+                city=safe_str(row['city']),
+                province=safe_str(row['province']),
+                site_type=safe_str(row['site_type']),
+                tower_type=safe_str(row['tower_type']),
+                tower_height=safe_float(row['tower_height']),
+                antena_height=safe_float(row['tower_height']),  # Using tower_height as in original
+                region_area=safe_str(row['region_area']),
+                region=safe_str(row['region']),
+                status=safe_str(row['status']),
+                tenant=safe_str(row['tenant']),
+                actual_revenue=safe_float(row['revenue']),
+                start_rental=safe_str(row['start_rental']),
+                end_rental=safe_str(row['end_rental']),
+                date_updated=safe_str(row['date_updated']),
                 active=True,
                 geometry=geometry_element
             )
             db.add(model)
         except Exception as e:
-            print(f"==>> e: {e}")
-            raise
+            print(f"Error processing row {index}: {e}")
+            print(f"Row data: {dict(row)}")
+            continue  # Skip this row and continue with the next
         finally:
-            db.commit()
+            try:
+                db.commit()
+            except Exception as commit_error:
+                print(f"Error committing row {index}: {commit_error}")
+                db.rollback()
 
 
 
 
 def import_m_operator(db):
-    data = gpd.read_parquet(f'./data/tb_operator.parquet')
-    # data = gpd.read_parquet(f'{google_cloud_storage_uri}/tb_operator.parquet', filesystem=fs)
+    # Try to read CSV file first (uploaded file), then fallback to parquet
+    csv_path = f'./data/tb_operator.csv'
+    parquet_path = f'./data/tb_operator.parquet'
+
+    data = None
+    file_used = None
+
+    if os.path.exists(csv_path):
+        try:
+            # Read CSV file and convert to GeoDataFrame
+            data = pd.read_csv(csv_path)
+
+            # Validate required columns
+            required_columns = [
+                'site_id', 'site_name', 'operator', 'source_db', 'code_db',
+                'longitude', 'latitude', 'tower_height', 'actual_revenue'
+            ]
+
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                print(f"Warning: Missing columns in CSV: {missing_columns}")
+                print("Available columns:", list(data.columns))
+                # Don't fail, just warn - use default values for missing columns
+
+            # Add missing columns with default values
+            for col in missing_columns:
+                if col in ['tower_height', 'actual_revenue']:
+                    data[col] = 0.0
+                else:
+                    data[col] = 'N/A'
+
+            # Ensure latitude and longitude are numeric
+            data['latitude'] = pd.to_numeric(data['latitude'], errors='coerce')
+            data['longitude'] = pd.to_numeric(data['longitude'], errors='coerce')
+
+            # Remove rows with invalid lat/lon
+            invalid_coords = data['latitude'].isna() | data['longitude'].isna()
+            if invalid_coords.any():
+                print(f"Warning: Removing {invalid_coords.sum()} rows with invalid coordinates")
+                data = data[~invalid_coords]
+
+            # Check if geometry column exists, if not create it from lat/lon
+            if 'geometry' not in data.columns:
+                data = gpd.GeoDataFrame(
+                    data,
+                    geometry=gpd.points_from_xy(data.longitude, data.latitude),
+                    crs='epsg:4326'
+                )
+            else:
+                data = gpd.GeoDataFrame(data, crs='epsg:4326')
+            file_used = "CSV"
+            print(f"Successfully loaded {len(data)} records from tb_operator.csv")
+        except Exception as e:
+            print(f"Failed to read CSV file: {e}")
+            data = None
+
+    # Fallback to parquet if CSV is not available or failed to read
+    if data is None and os.path.exists(parquet_path):
+        try:
+            data = gpd.read_parquet(parquet_path)
+            file_used = "PARQUET"
+            print(f"Fallback: Successfully loaded {len(data)} records from tb_operator.parquet")
+        except Exception as e:
+            print(f"Failed to read parquet file: {e}")
+            raise e
+
+    if data is None:
+        raise FileNotFoundError("Neither tb_operator.csv nor tb_operator.parquet found in ./data/ directory")
+
+    print(f"Processing {len(data)} records from {file_used} file...")
+
     for index, row in tqdm(data.iterrows(), total=len(data)):
         try:
             geometry_wkt = row['geometry'].wkt if row['geometry'] else None
@@ -215,26 +479,41 @@ def import_m_operator(db):
             else:
                 geometry_element = None
 
+            # Helper function to safely convert values
+            def safe_str(value, default='N/A'):
+                return str(value) if pd.notna(value) and value != '' else default
+
+            def safe_float(value, default=0.0):
+                try:
+                    return float(value) if pd.notna(value) and value != '' else default
+                except (ValueError, TypeError):
+                    return default
+
             model = mOperator(
-                site_id=str(row['site_id']),
-                site_name=str(row['site_name']),
-                operator=str(row['operator']),
-                source_db=str(row['source_db']),
-                code_db=str(row['code_db']),
-                longitude=float(row['longitude']),
-                latitude=float(row['latitude']),
-                tower_height=float(row['tower_height']),
-                actual_revenue=float(row['actual_revenue']),
+                site_id=safe_str(row['site_id']),
+                site_name=safe_str(row['site_name']),
+                operator=safe_str(row['operator']),
+                source_db=safe_str(row['source_db']),
+                code_db=safe_str(row['code_db']),
+                longitude=safe_float(row['longitude']),
+                latitude=safe_float(row['latitude']),
+                tower_height=safe_float(row['tower_height']),
+                actual_revenue=safe_float(row['actual_revenue']),
                 active=True,
                 geometry=geometry_element
-
             )
             db.add(model)
         except Exception as e:
-            print(f"==>> e: {e}")
-            pass
+            print(f"Error processing row {index}: {e}")
+            print(f"Row data: {dict(row)}")
+            continue  # Skip this row and continue with the next
         finally:
-            db.commit()
+            try:
+                db.commit()
+            except Exception as commit_error:
+                print(f"Error committing row {index}: {commit_error}")
+                db.rollback()
+
 def import_m_poi(db):
     # data = gpd.read_parquet(f'{google_cloud_storage_uri}/tb_poi.parquet', filesystem=fs)
     data = gpd.read_parquet(f'./data/tb_poi.parquet')
@@ -411,18 +690,96 @@ def import_m_arpu_af(db):
             db.commit()
 
 def import_m_siro(db):
-    data = pd.read_csv(f'./data/siro.csv')
-    data = gpd.GeoDataFrame(data, geometry=gpd.points_from_xy(data.longitude, data.latitude), crs='epsg:4326')
+    # Try to read CSV file first (uploaded file), then fallback to existing file
+    csv_path = f'./data/siro.csv'
+
+    data = None
+    file_used = None
+
+    if os.path.exists(csv_path):
+        try:
+            # Read CSV file and convert to GeoDataFrame
+            data = pd.read_csv(csv_path)
+
+            # Validate required columns
+            required_columns = [
+                'site_id', 'site_name', 'latitude', 'longitude', 'address',
+                'site_type', 'tower_type', 'tower_height', 'region_area',
+                'region', 'status', 'tenant', 'revenue',
+                'start_rental', 'end_rental', 'comid_village', 'comid_district',
+                'comid_city', 'comid_province', 'id_village', 'id_district',
+                'id_city', 'id_province', 'village', 'district', 'city', 'province',
+                'date_updated', 'tp_name', 'tp_site_id', 'tp_site_name',
+                'tp_tower_height', 'tp_site_type', 'tp_distance', 'tp_long', 'tp_lat',
+                'siro_status', 'tp_to_dbo_distance', 'tp_dbo_distance_ratio',
+                'competition_type', 'dbo_distance', 'competition_type_id'
+            ]
+
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                print(f"Warning: Missing columns in CSV: {missing_columns}")
+                print("Available columns:", list(data.columns))
+                # Don't fail, just warn - use default values for missing columns
+
+            # Add missing columns with default values
+            for col in missing_columns:
+                if col in ['tower_height', 'revenue', 'tp_distance', 'tp_long', 'tp_lat',
+                          'tp_to_dbo_distance', 'tp_dbo_distance_ratio', 'dbo_distance']:
+                    data[col] = 0.0
+                elif col in ['tp_tower_height']:
+                    data[col] = 'No Data'
+                else:
+                    data[col] = 'N/A'
+
+            # Ensure latitude and longitude are numeric
+            data['latitude'] = pd.to_numeric(data['latitude'], errors='coerce')
+            data['longitude'] = pd.to_numeric(data['longitude'], errors='coerce')
+
+            # Remove rows with invalid lat/lon
+            invalid_coords = data['latitude'].isna() | data['longitude'].isna()
+            if invalid_coords.any():
+                print(f"Warning: Removing {invalid_coords.sum()} rows with invalid coordinates")
+                data = data[~invalid_coords]
+
+            # Create GeoDataFrame with geometry
+            data = gpd.GeoDataFrame(
+                data,
+                geometry=gpd.points_from_xy(data.longitude, data.latitude),
+                crs='epsg:4326'
+            )
+            file_used = "CSV"
+            print(f"Successfully loaded {len(data)} records from siro.csv")
+        except Exception as e:
+            print(f"Failed to read CSV file: {e}")
+            raise e
+    else:
+        raise FileNotFoundError("siro.csv not found in ./data/ directory")
+
+    print(f"Processing {len(data)} records from {file_used} file...")
+
+    # data = pd.read_csv(f'./data/siro.csv')
+    # data = gpd.GeoDataFrame(data, geometry=gpd.points_from_xy(data.longitude, data.latitude), crs='epsg:4326')
 
     for _, row in tqdm(data.iterrows(), total=len(data)):
-        tp_to_dbo_distance = 0.0 if pd.isna(row["tp_to_dbo_distance"]) or row["tp_to_dbo_distance"] == "" else float(row["tp_to_dbo_distance"])
-        tp_dbo_distance_ratio = 0.0 if pd.isna(row["tp_dbo_distance_ratio"]) or row["tp_dbo_distance_ratio"] == "" else float(row["tp_dbo_distance_ratio"])
+        # Helper function to safely convert values
+        def safe_str(value, default='N/A'):
+            return str(value) if pd.notna(value) and value != '' else default
 
-        if row['tp_tower_height'] != 'No Data':
-            tp_tower_height = row['tp_tower_height']
+        def safe_float(value, default=0.0):
+            try:
+                return float(value) if pd.notna(value) and value != '' else default
+            except (ValueError, TypeError):
+                return default
+
+        # Handle special cases for tp_to_dbo_distance and tp_dbo_distance_ratio
+        tp_to_dbo_distance = safe_float(row.get("tp_to_dbo_distance", 0.0))
+        tp_dbo_distance_ratio = safe_float(row.get("tp_dbo_distance_ratio", 0.0))
+
+        # Handle tp_tower_height special logic
+        if safe_str(row.get('tp_tower_height', 'No Data')) != 'No Data':
+            tp_tower_height = safe_float(row['tp_tower_height'])
         else:
-            tp_tower_height = row['tower_height']
-
+            tp_tower_height = safe_float(row['tower_height'])
 
         try:
             # Handle geometry
@@ -430,58 +787,63 @@ def import_m_siro(db):
             geometry_element = WKTElement(geometry_wkt, srid=4326) if geometry_wkt else None
 
             model = mSiro(
-                site_id=str(row["site_id"]),
-                site_name=str(row["site_name"]),
-                latitude=float(row["latitude"]),
-                longitude=float(row["longitude"]),
-                address=str(row["address"]),
-                site_type=str(row["site_type"]),
-                tower_type=str(row["tower_type"]),
-                tower_height=float(row["tower_height"]),
-                antena_height=float(row["tower_height"]),
-                region_area=str(row["region_area"]),
-                region=str(row["region"]),
-                status=str(row["status"]),
-                tenant=str(row["tenant"]),
-                actual_revenue=float(row["revenue"]),
-                start_rental=str(row["start_rental"]),
-                end_rental=str(row["end_rental"]),
-                comid_village=str(row["comid_village"]),
-                comid_district=str(row["comid_district"]),
-                comid_city=str(row["comid_city"]),
-                comid_province=str(row["comid_province"]),
-                id_village=str(row["id_village"]),
-                id_district=str(row["id_district"]),
-                id_city=str(row["id_city"]),
-                id_province=str(row["id_province"]),
-                village=str(row["village"]),
-                district=str(row["district"]),
-                city=str(row["city"]),
-                province=str(row["province"]),
-                date_updated=str(row['date_updated']),
-                tp_name=str(row["tp_name"]),
-                tp_site_id=str(row["tp_site_id"]),
-                tp_site_name=str(row["tp_site_name"]),
+                site_id=safe_str(row["site_id"]),
+                site_name=safe_str(row["site_name"]),
+                latitude=safe_float(row["latitude"]),
+                longitude=safe_float(row["longitude"]),
+                address=safe_str(row["address"]),
+                site_type=safe_str(row["site_type"]),
+                tower_type=safe_str(row["tower_type"]),
+                tower_height=safe_float(row["tower_height"]),
+                antena_height=safe_float(row["tower_height"]),
+                region_area=safe_str(row["region_area"]),
+                region=safe_str(row["region"]),
+                status=safe_str(row["status"]),
+                tenant=safe_str(row["tenant"]),
+                actual_revenue=safe_float(row["revenue"]),
+                start_rental=safe_str(row["start_rental"]),
+                end_rental=safe_str(row["end_rental"]),
+                comid_village=safe_str(row["comid_village"]),
+                comid_district=safe_str(row["comid_district"]),
+                comid_city=safe_str(row["comid_city"]),
+                comid_province=safe_str(row["comid_province"]),
+                id_village=safe_str(row["id_village"]),
+                id_district=safe_str(row["id_district"]),
+                id_city=safe_str(row["id_city"]),
+                id_province=safe_str(row["id_province"]),
+                village=safe_str(row["village"]),
+                district=safe_str(row["district"]),
+                city=safe_str(row["city"]),
+                province=safe_str(row["province"]),
+                date_updated=safe_str(row['date_updated']),
+                tp_name=safe_str(row["tp_name"]),
+                tp_site_id=safe_str(row["tp_site_id"]),
+                tp_site_name=safe_str(row["tp_site_name"]),
                 tp_tower_height=tp_tower_height,
                 tp_antena_height=tp_tower_height,
-                tp_site_type=str(row["tp_site_type"]),
-                tp_distance=float(row["tp_distance"]),
-                tp_long=float(row["tp_long"]),
-                tp_lat=float(row["tp_lat"]),
-                siro_status=str(row["siro_status"]),
+                tp_site_type=safe_str(row["tp_site_type"]),
+                tp_distance=safe_float(row["tp_distance"]),
+                tp_long=safe_float(row["tp_long"]),
+                tp_lat=safe_float(row["tp_lat"]),
+                siro_status=safe_str(row["siro_status"]),
                 tp_to_dbo_distance=tp_to_dbo_distance,
                 tp_dbo_distance_ratio=tp_dbo_distance_ratio,
-                competition_type=str(row["competition_type"]),
-                dbo_distance=float(row["dbo_distance"]),
-                competition_type_id=str(row["competition_type_id"]),
+                competition_type=safe_str(row["competition_type"]),
+                dbo_distance=safe_float(row["dbo_distance"]),
+                competition_type_id=safe_str(row["competition_type_id"]),
                 geometry=geometry_element
             )
             db.add(model)
         except Exception as e:
-            raise
-            pass
+            print(f"Error processing SIRO row: {e}")
+            print(f"Row data: {dict(row)}")
+            continue  # Skip this row and continue with the next
         finally:
-            db.commit()
+            try:
+                db.commit()
+            except Exception as commit_error:
+                print(f"Error committing SIRO row: {commit_error}")
+                db.rollback()
 
 class tables(str, Enum):
     ALL_TABLES = 'all_tables'

@@ -805,7 +805,7 @@ async def upload_data_file(
     """
     try:
         # Validate table name
-        supported_tables = ['m_colopriming', 'm_operator', 'm_colopriming_sopt']
+        supported_tables = ['m_colopriming', 'm_operator', 'm_colopriming_sopt', 'm_siro']
         if table_name not in supported_tables:
             raise HTTPException(
                 status_code=400,
@@ -823,8 +823,9 @@ async def upload_data_file(
         # Determine target filename based on table
         filename_mapping = {
             'm_colopriming': 'tb_colopriming.parquet' if file_extension == '.parquet' else 'tb_colopriming.csv',
-            'm_operator': 'tb_operator.parquet',
-            'm_colopriming_sopt': 'tb_colopriming_sopt.parquet'
+            'm_operator': 'tb_operator.parquet' if file_extension == '.parquet' else 'tb_operator.csv',
+            'm_colopriming_sopt': 'tb_colopriming_sopt.parquet' if file_extension == '.parquet' else 'tb_colopriming_sopt.csv',
+            'm_siro': 'siro.parquet' if file_extension == '.parquet' else 'siro.csv'
         }
 
         target_filename = filename_mapping[table_name]
@@ -918,13 +919,15 @@ async def upload_data_file(
 @app.get('/dataFileInfo/{table_name}')
 async def get_data_file_info(
     table_name: str,
+    request: Request,
     api_key: str = Security(get_api_key)
 ):
     """
     Get information about data files for specific tables
     """
     try:
-        supported_tables = ['m_colopriming', 'm_operator', 'm_colopriming_sopt']
+
+        supported_tables = ['m_colopriming', 'm_operator', 'm_colopriming_sopt', 'm_siro']
         if table_name not in supported_tables:
             raise HTTPException(
                 status_code=400,
@@ -933,8 +936,9 @@ async def get_data_file_info(
 
         filename_mapping = {
             'm_colopriming': ['tb_colopriming.parquet', 'tb_colopriming.csv'],
-            'm_operator': ['tb_operator.parquet'],
-            'm_colopriming_sopt': ['tb_colopriming_sopt.parquet']
+            'm_operator': ['tb_operator.parquet', 'tb_operator.csv'],
+            'm_colopriming_sopt': ['tb_colopriming_sopt.parquet', 'tb_colopriming_sopt.csv'],
+            'm_siro': ['siro.parquet', 'siro.csv']
         }
 
         files_info = []
@@ -954,13 +958,22 @@ async def get_data_file_info(
                     'exists': False
                 })
 
-        # Get database record count
+                        # Get database record count
         db = SessionSync()
         try:
-            model = tablesModel[table_name]['model']
-            record_count = db.query(model).filter_by(active=True).count()
-        except:
-            record_count = None
+            if table_name in tablesModel:
+                model = tablesModel[table_name]['model']
+                                # Add explicit commit to ensure fresh data
+                db.commit()
+
+                total_count = db.query(model).count()
+                active_count = db.query(model).filter_by(active=True).count()
+
+                record_count = active_count
+            else:
+                record_count = 0
+        except Exception as e:
+            record_count = 0
         finally:
             db.close()
 

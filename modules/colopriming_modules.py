@@ -496,6 +496,7 @@ def genSectoral(Longitude, Latitude, steps, sectors, radius):
         # create center line feature
         center_line_vertices = [polar_point(center, start + x * sector_width + sector_width / 2, 0),
                                 polar_point(center, start + x * sector_width + sector_width / 2, rad)]
+        
         lineString = LineString(center_line_vertices)
         lastCoordinates = lineString.coords[-1]
         last_coordinates.append(lastCoordinates)
